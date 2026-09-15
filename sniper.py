@@ -4,39 +4,47 @@ import requests
 import asyncio
 import os
 
+
 # =========================================================
 # CONFIGURACIÓN
 # =========================================================
 
 TOKEN = os.getenv("TOKEN", "").strip()
 
-print("TOKEN existe:", bool(TOKEN))
-print("TOKEN longitud:", len(TOKEN))
-
 if not TOKEN:
     raise RuntimeError("No se encontró la variable TOKEN en Railway")
+
 
 intents = discord.Intents.default()
 intents.message_content = True
 
-bot = commands.Bot(command_prefix="!", intents=intents)
+bot = commands.Bot(
+    command_prefix="!",
+    intents=intents
+)
 
 
 # =========================================================
-# VARIABLES DE WATCH
+# USUARIOS QUE ESTAMOS VIGILANDO
 # =========================================================
 
-watching_user = None
-watching_channel = None
-last_status = None
+# Cada usuario tiene sus propios datos.
+#
+# {
+#     user_id: {
+#         "user": ...,
+#         "channel": ...,
+#         "mode": "watch" / "watchfind",
+#         "last_status": ...,
+#         "last_game_id": ...
+#     }
+# }
 
-# Para !watchfind
-watchfind_enabled = False
-watchfind_last_game_id = None
+watching_users = {}
 
 
 # =========================================================
-# ROBLOX - BUSCAR USUARIO
+# ROBLOX - OBTENER USUARIO
 # =========================================================
 
 def get_user(username):
@@ -47,26 +55,26 @@ def get_user(username):
                 "usernames": [username],
                 "excludeBannedUsers": False
             },
-            timeout=15
+            timeout=10
         )
 
         if response.status_code != 200:
             return None
 
-        users = response.json().get("data", [])
+        data = response.json()
 
-        if not users:
+        if not data.get("data"):
             return None
 
-        return users[0]
+        return data["data"][0]
 
-    except Exception as error:
-        print("Error buscando usuario:", error)
+    except Exception as e:
+        print("Error get_user:", e)
         return None
 
 
 # =========================================================
-# ROBLOX - PRESENCIA
+# ROBLOX - PRESENCIA DE UN USUARIO
 # =========================================================
 
 def get_presence(user_id):
@@ -76,22 +84,71 @@ def get_presence(user_id):
             json={
                 "userIds": [user_id]
             },
-            timeout=15
+            timeout=10
         )
 
         if response.status_code != 200:
             return None
 
-        presences = response.json().get("userPresences", [])
+        data = response.json()
 
-        if not presences:
+        if not data.get("userPresences"):
             return None
 
-        return presences[0]
+        return data["userPresences"][0]
 
-    except Exception as error:
-        print("Error obteniendo presencia:", error)
+    except Exception as e:
+        print("Error get_presence:", e)
         return None
+
+
+# =========================================================
+# ROBLOX - PRESENCIAS EN GRUPO
+# =========================================================
+
+def get_presences_batch(user_ids):
+    """
+    Obtiene las presencias de varios usuarios en una sola
+    petición.
+
+    Se dividen en grupos de 50 para evitar mandar una
+    petición demasiado grande.
+    """
+
+    results = {}
+
+    for i in range(0, len(user_ids), 50):
+
+        chunk = user_ids[i:i + 50]
+
+        try:
+            response = requests.post(
+                "https://presence.roblox.com/v1/presence/users",
+                json={
+                    "userIds": chunk
+                },
+                timeout=15
+            )
+
+            if response.status_code != 200:
+                print(
+                    "Error presencia batch:",
+                    response.status_code
+                )
+                continue
+
+            data = response.json()
+
+            for presence in data.get("userPresences", []):
+                user_id = presence.get("userId")
+
+                if user_id is not None:
+                    results[user_id] = presence
+
+        except Exception as e:
+            print("Error get_presences_batch:", e)
+
+    return results
 
 
 # =========================================================
@@ -99,6 +156,7 @@ def get_presence(user_id):
 # =========================================================
 
 def get_avatar(user_id):
+
     try:
         response = requests.get(
             "https://thumbnails.roblox.com/v1/users/avatar-headshot",
@@ -106,112 +164,136 @@ def get_avatar(user_id):
                 "userIds": user_id,
                 "size": "420x420",
                 "format": "Png",
-                "isCircular": "false"
+                "isCircular": False
             },
-            timeout=15
+            timeout=10
         )
 
         if response.status_code != 200:
             return None
 
-        data = response.json().get("data", [])
+        data = response.json()
 
-        if not data:
+        if not data.get("data"):
             return None
 
-        return data[0].get("imageUrl")
+        return data["data"][0].get("imageUrl")
 
-    except Exception as error:
-        print("Error obteniendo avatar:", error)
+    except Exception as e:
+        print("Error get_avatar:", e)
         return None
 
 
 # =========================================================
-# ROBLOX - OBTENER TODOS LOS SERVIDORES PÚBLICOS
+# ROBLOX - SERVIDORES PÚBLICOS
 # =========================================================
 
 def get_all_servers(place_id):
-    url = f"https://games.roblox.com/v1/games/{place_id}/servers/Public"
 
-    all_servers = []
+    servers = []
     cursor = None
 
     while True:
-        params = {
-            "sortOrder": "Asc",
-            "limit": 100
-        }
-
-        if cursor:
-            params["cursor"] = cursor
 
         try:
+
+            params = {
+                "sortOrder": "Asc",
+                "limit": 100
+            }
+
+            if cursor:
+                params["cursor"] = cursor
+
             response = requests.get(
-                url,
+                f"https://games.roblox.com/v1/games/{place_id}/servers/Public",
                 params=params,
                 timeout=15
             )
 
-        except Exception as error:
-            print("Error consultando servidores:", error)
+            if response.status_code != 200:
+                print(
+                    "Error servidores:",
+                    response.status_code
+                )
+                break
+
+            data = response.json()
+
+            for server in data.get("data", []):
+
+                servers.append(server)
+
+            cursor = data.get("nextPageCursor")
+
+            if not cursor:
+                break
+
+        except Exception as e:
+
+            print("Error get_all_servers:", e)
             break
 
-        if response.status_code != 200:
-            print(
-                "Roblox respondió:",
-                response.status_code,
-                response.text[:500]
-            )
-            break
-
-        data = response.json()
-
-        servers = data.get("data", [])
-
-        all_servers.extend(servers)
-
-        cursor = data.get("nextPageCursor")
-
-        if not cursor:
-            break
-
-    # Ordenar de más vacío a más lleno
-    all_servers.sort(
+    servers.sort(
         key=lambda server: server.get("playing", 0)
     )
 
-    return all_servers
+    return servers
 
 
 # =========================================================
-# CREAR LINK PARA UNIRSE AL SERVIDOR
+# LINK PARA UNIRSE AL SERVIDOR
 # =========================================================
 
 def create_join_link(place_id, game_id):
+
     return (
-        "roblox://experiences/start?"
-        f"placeId={place_id}&"
-        f"gameInstanceId={game_id}"
+        f"roblox://experiences/start"
+        f"?placeId={place_id}"
+        f"&gameInstanceId={game_id}"
     )
 
 
 # =========================================================
-# BOT LISTO
+# CONVERTIR PRESENCIA A TEXTO
+# =========================================================
+
+def presence_text(presence):
+
+    if not presence:
+        return "Offline"
+
+    presence_type = presence.get("userPresenceType", 0)
+
+    if presence_type == 0:
+        return "Offline"
+
+    if presence_type == 1:
+        return "Online"
+
+    if presence_type == 2:
+        return "Jugando"
+
+    if presence_type == 3:
+        return "En Roblox Studio"
+
+    return "Desconocido"
+
+
+# =========================================================
+# BOT READY
 # =========================================================
 
 @bot.event
 async def on_ready():
 
-    print(f"Bot conectado como {bot.user}")
+    print("=" * 50)
+    print(f"Bot conectado como: {bot.user}")
+    print(f"ID: {bot.user.id}")
+    print("=" * 50)
 
-    try:
-        await bot.change_presence(
-            activity=discord.Game(
-                name="Roblox Sniper"
-            )
-        )
-    except Exception:
-        pass
+    if not check_presence.is_running():
+        check_presence.start()
 
 
 # =========================================================
@@ -222,7 +304,7 @@ async def on_ready():
 async def snipe(ctx, username):
 
     await ctx.send(
-        f"🔎 Buscando a `{username}` en Roblox..."
+        f"🔎 Buscando a **{username}**..."
     )
 
     user = await asyncio.to_thread(
@@ -231,9 +313,11 @@ async def snipe(ctx, username):
     )
 
     if not user:
+
         await ctx.send(
-            "❌ No encontré ese usuario."
+            f"❌ No encontré al usuario **{username}**."
         )
+
         return
 
     user_id = user["id"]
@@ -243,70 +327,51 @@ async def snipe(ctx, username):
         user_id
     )
 
-    if not presence:
+    status = presence_text(presence)
+
+    if status == "Offline":
+
         await ctx.send(
-            "❌ No pude comprobar la presencia."
+            f"⚫ **{user['name']}** está offline."
         )
+
         return
 
-    status = presence.get(
-        "userPresenceType"
+    if status == "Online":
+
+        await ctx.send(
+            f"🟢 **{user['name']}** está online, "
+            f"pero no está jugando."
+        )
+
+        return
+
+    if status == "En Roblox Studio":
+
+        await ctx.send(
+            f"🛠️ **{user['name']}** está en Roblox Studio."
+        )
+
+        return
+
+    place_id = presence.get("placeId")
+    game_id = presence.get("gameId")
+
+    message = (
+        f"🎯 **{user['name']} está jugando**\n\n"
+        f"**User ID:** `{user_id}`\n"
+        f"**Place ID:** `{place_id}`\n"
+        f"**Game ID:** `{game_id}`"
     )
 
-    # Offline
-    if status == 0:
+    if game_id and place_id:
 
-        await ctx.send(
-            f"🔴 `{user['name']}` está desconectado."
+        message += (
+            f"\n\n🔗 **Join:**\n"
+            f"`{create_join_link(place_id, game_id)}`"
         )
 
-        return
-
-    # Online pero sin jugar
-    if status == 1:
-
-        await ctx.send(
-            f"🟡 `{user['name']}` está en Roblox, "
-            "pero no está jugando."
-        )
-
-        return
-
-    # Roblox Studio
-    if status == 3:
-
-        await ctx.send(
-            f"🟡 `{user['name']}` está en Roblox Studio."
-        )
-
-        return
-
-    # Jugando
-    if status == 2:
-
-        place_id = presence.get("placeId")
-        game_id = presence.get("gameId")
-
-        message = (
-            f"🟢 **{user['name']} está jugando!**\n\n"
-            f"**User ID:** `{user_id}`\n"
-            f"**Place ID:** `{place_id}`\n"
-            f"**Game ID:** `{game_id}`"
-        )
-
-        if place_id and game_id:
-
-            join_link = create_join_link(
-                place_id,
-                game_id
-            )
-
-            message += (
-                f"\n\n🔗 **Intentar unirse:**\n"
-                f"{join_link}"
-            )
-
-        await ctx.send(message)
+    await ctx.send(message)
 
 
 # =========================================================
@@ -316,12 +381,6 @@ async def snipe(ctx, username):
 @bot.command()
 async def watch(ctx, username):
 
-    global watching_user
-    global watching_channel
-    global last_status
-    global watchfind_enabled
-    global watchfind_last_game_id
-
     user = await asyncio.to_thread(
         get_user,
         username
@@ -330,28 +389,31 @@ async def watch(ctx, username):
     if not user:
 
         await ctx.send(
-            "❌ No encontré ese usuario."
+            f"❌ No encontré al usuario **{username}**."
         )
 
         return
 
-    watching_user = user
-    watching_channel = ctx.channel
+    user_id = user["id"]
 
-    last_status = None
+    watching_users[user_id] = {
 
-    watchfind_enabled = False
-    watchfind_last_game_id = None
+        "user": user,
+
+        "channel": ctx.channel,
+
+        "mode": "watch",
+
+        "last_status": None,
+
+        "last_game_id": None
+    }
 
     await ctx.send(
         f"👁️ Ahora estoy vigilando a "
-        f"**{user['name']}**.\n"
-        "Comprobaré su presencia automáticamente "
-        "cada 15 segundos."
+        f"**{user['name']}**.\n\n"
+        f"Revisión cada **15 segundos**."
     )
-
-    if not check_presence.is_running():
-        check_presence.start()
 
 
 # =========================================================
@@ -361,11 +423,61 @@ async def watch(ctx, username):
 @bot.command()
 async def watchfind(ctx, username):
 
-    global watching_user
-    global watching_channel
-    global last_status
-    global watchfind_enabled
-    global watchfind_last_game_id
+    user = await asyncio.to_thread(
+        get_user,
+        username
+    )
+
+    if not user:
+
+        await ctx.send(
+            f"❌ No encontré al usuario **{username}**."
+        )
+
+        return
+
+    user_id = user["id"]
+
+    watching_users[user_id] = {
+
+        "user": user,
+
+        "channel": ctx.channel,
+
+        "mode": "watchfind",
+
+        "last_status": None,
+
+        "last_game_id": None
+    }
+
+    await ctx.send(
+        f"🎯 Ahora estoy haciendo **WATCHFIND** "
+        f"de **{user['name']}**.\n\n"
+        f"Revisión cada **15 segundos**."
+    )
+
+
+# =========================================================
+# !UNWATCH
+# =========================================================
+
+@bot.command()
+async def unwatch(ctx, username=None):
+
+    # Sin nombre = eliminar todos
+    if username is None:
+
+        amount = len(watching_users)
+
+        watching_users.clear()
+
+        await ctx.send(
+            f"🛑 Dejé de vigilar a **todos los usuarios**.\n"
+            f"Usuarios eliminados: `{amount}`"
+        )
+
+        return
 
     user = await asyncio.to_thread(
         get_user,
@@ -375,86 +487,84 @@ async def watchfind(ctx, username):
     if not user:
 
         await ctx.send(
-            "❌ No encontré ese usuario."
+            f"❌ No encontré al usuario **{username}**."
         )
 
         return
 
-    watching_user = user
-    watching_channel = ctx.channel
+    user_id = user["id"]
 
-    last_status = None
+    if user_id not in watching_users:
 
-    watchfind_enabled = True
-    watchfind_last_game_id = None
+        await ctx.send(
+            f"⚠️ **{user['name']}** no estaba siendo vigilado."
+        )
+
+        return
+
+    del watching_users[user_id]
 
     await ctx.send(
-        f" **WatchFind activado para `{user['name']}`**\n\n"
-        " Comprobaré su presencia cada 15 segundos.\n"
-        " Cuando empiece a jugar, buscaré su servidor "
-        "entre los servidores públicos y te avisaré."
+        f"🛑 Dejé de vigilar a **{user['name']}**."
     )
-
-    if not check_presence.is_running():
-        check_presence.start()
 
 
 # =========================================================
-# !UNWATCH
+# !WATCHLIST
 # =========================================================
 
 @bot.command()
-async def unwatch(ctx):
+async def watchlist(ctx):
 
-    global watching_user
-    global watching_channel
-    global last_status
-    global watchfind_enabled
-    global watchfind_last_game_id
+    if not watching_users:
 
-    watching_user = None
-    watching_channel = None
+        await ctx.send(
+            "📭 No hay usuarios siendo vigilados."
+        )
 
-    last_status = None
+        return
 
-    watchfind_enabled = False
-    watchfind_last_game_id = None
+    lines = []
 
-    await ctx.send(
-        "🛑 Dejé de vigilar al usuario."
+    for user_id, data in watching_users.items():
+
+        user = data["user"]
+
+        mode = data["mode"]
+
+        if mode == "watch":
+            mode_text = "WATCH"
+        else:
+            mode_text = "WATCHFIND"
+
+        lines.append(
+            f"• **{user['name']}** — `{mode_text}`"
+        )
+
+    text = (
+        f"👁️ **Usuarios vigilados: "
+        f"{len(watching_users)}**\n\n"
+        + "\n".join(lines)
     )
+
+    await ctx.send(text)
 
 
 # =========================================================
-# CREAR TARJETA DE !FIND
+# FIND VIEW
 # =========================================================
 
 class FindView(discord.ui.View):
 
-    def __init__(
-        self,
-        ctx,
-        username,
-        place_id,
-        game_id
-    ):
+    def __init__(self, join_url):
 
-        super().__init__(timeout=300)
+        super().__init__(timeout=None)
 
-        self.ctx = ctx
-        self.username = username
-        self.place_id = place_id
-        self.game_id = game_id
-
-        self.join_url = create_join_link(
-            place_id,
-            game_id
-        )
+        self.join_url = join_url
 
     @discord.ui.button(
-        label="Unirse al servidor",
-        emoji="🎮",
-        style=discord.ButtonStyle.success
+        label="🎮 Join Server",
+        style=discord.ButtonStyle.green
     )
     async def join_button(
         self,
@@ -462,117 +572,94 @@ class FindView(discord.ui.View):
         button: discord.ui.Button
     ):
 
-        if interaction.user.id != self.ctx.author.id:
-
-            await interaction.response.send_message(
-                "❌ Solo la persona que ejecutó "
-                "el comando puede usar este botón.",
-                ephemeral=True
-            )
-
-            return
-
         await interaction.response.send_message(
-            f"🎮 **Servidor encontrado**\n\n"
-            f"🔗 {self.join_url}",
+            f"`{self.join_url}`",
             ephemeral=True
         )
 
 
+# =========================================================
+# CREAR CARD DE FIND
+# =========================================================
+
 async def create_find_card(
-    ctx,
     user,
     presence,
     server
 ):
 
     user_id = user["id"]
-    username = user["name"]
 
-    place_id = presence.get("placeId")
-    game_id = presence.get("gameId")
-
-    playing = server.get(
-        "playing",
-        0
-    )
-
-    max_players = server.get(
-        "maxPlayers",
-        0
-    )
-
-    job_id = server.get(
-        "id",
-        "Desconocido"
-    )
-
-    avatar_url = await asyncio.to_thread(
+    avatar = await asyncio.to_thread(
         get_avatar,
         user_id
     )
 
+    place_id = presence.get("placeId")
+
+    game_id = server.get("id")
+
+    playing = server.get("playing", 0)
+
+    max_players = server.get("maxPlayers", 0)
+
     embed = discord.Embed(
-        title="🎯 Usuario encontrado",
+        title="🎯 Jugador encontrado",
         description=(
-            f"🟢 **{username} está jugando actualmente**"
-        )
+            f"**{user['name']}** fue encontrado "
+            f"en un servidor público."
+        ),
+        color=discord.Color.green()
     )
 
-    if avatar_url:
-
-        embed.set_thumbnail(
-            url=avatar_url
-        )
-
     embed.add_field(
-        name="👤 Usuario",
-        value=f"`{username}`",
-        inline=False
+        name="👤 Username",
+        value=f"`{user['name']}`",
+        inline=True
     )
 
     embed.add_field(
         name="🆔 User ID",
         value=f"`{user_id}`",
-        inline=False
+        inline=True
     )
 
     embed.add_field(
-        name="🎮 Place ID",
+        name="📍 Place ID",
         value=f"`{place_id}`",
         inline=False
     )
 
     embed.add_field(
-        name="👥 Jugadores",
+        name="👥 Players",
         value=f"`{playing}/{max_players}`",
+        inline=True
+    )
+
+    embed.add_field(
+        name="🎮 Job ID",
+        value=f"`{game_id}`",
         inline=False
     )
 
     embed.add_field(
-        name="🆔 Job ID",
-        value=f"`{job_id}`",
-        inline=False
+        name="🟢 Status",
+        value="Jugando",
+        inline=True
     )
 
-    embed.add_field(
-        name="📡 Estado",
-        value="🟢 Jugando",
-        inline=False
-    )
+    if avatar:
 
-    embed.set_footer(
-        text="Roblox Server Finder"
-    )
+        embed.set_thumbnail(
+            url=avatar
+        )
 
-    view = FindView(
-        ctx,
-        username,
+    join_url = create_join_link(
         place_id,
         game_id
     )
 
-    return embed, view
+    return embed, join_url
 
 
 # =========================================================
@@ -582,449 +669,163 @@ async def create_find_card(
 @bot.command()
 async def find(ctx, username):
 
-    searching = await ctx.send(
-        f"🔎 **Buscando a `{username}`...**\n"
-        "Obteniendo información de Roblox."
+    await ctx.send(
+        f"🔎 Buscando a **{username}**..."
     )
 
-    try:
-
-        user = await asyncio.to_thread(
-            get_user,
-            username
-        )
-
-        if not user:
-
-            await searching.edit(
-                content=(
-                    f"❌ No encontré al usuario "
-                    f"`{username}`."
-                )
-            )
-
-            return
-
-        user_id = user["id"]
-
-        presence = await asyncio.to_thread(
-            get_presence,
-            user_id
-        )
-
-        if not presence:
-
-            await searching.edit(
-                content=(
-                    "❌ No pude obtener la "
-                    "presencia del usuario."
-                )
-            )
-
-            return
-
-        status = presence.get(
-            "userPresenceType"
-        )
-
-        # Offline
-        if status == 0:
-
-            await searching.edit(
-                content=(
-                    f"🔴 **{user['name']}** "
-                    "está desconectado."
-                )
-            )
-
-            return
-
-        # Online
-        if status == 1:
-
-            await searching.edit(
-                content=(
-                    f"🟡 **{user['name']}** está "
-                    "en Roblox, pero actualmente "
-                    "no está jugando."
-                )
-            )
-
-            return
-
-        # Studio
-        if status == 3:
-
-            await searching.edit(
-                content=(
-                    f"🟡 **{user['name']}** "
-                    "está en Roblox Studio."
-                )
-            )
-
-            return
-
-        # No jugando
-        if status != 2:
-
-            await searching.edit(
-                content=(
-                    "❌ Estado de presencia "
-                    "desconocido."
-                )
-            )
-
-            return
-
-        place_id = presence.get(
-            "placeId"
-        )
-
-        game_id = presence.get(
-            "gameId"
-        )
-
-        if not place_id or not game_id:
-
-            await searching.edit(
-                content=(
-                    f"🟡 **{user['name']}** está jugando, "
-                    "pero Roblox no proporcionó "
-                    "el servidor."
-                )
-            )
-
-            return
-
-        await searching.edit(
-            content=(
-                f"🔎 **{user['name']} está jugando.**\n"
-                "Buscando su servidor entre los "
-                "servidores públicos..."
-            )
-        )
-
-        servers = await asyncio.to_thread(
-            get_all_servers,
-            int(place_id)
-        )
-
-        found_server = None
-
-        for server in servers:
-
-            if server.get("id") == game_id:
-
-                found_server = server
-
-                break
-
-        # No encontrado
-        if found_server is None:
-
-            embed = discord.Embed(
-                title="🟡 Usuario encontrado",
-                description=(
-                    f"**{user['name']}** está jugando, "
-                    "pero su servidor no apareció "
-                    "en la lista pública."
-                )
-            )
-
-            avatar_url = await asyncio.to_thread(
-                get_avatar,
-                user_id
-            )
-
-            if avatar_url:
-
-                embed.set_thumbnail(
-                    url=avatar_url
-                )
-
-            embed.add_field(
-                name="👤 Usuario",
-                value=f"`{user['name']}`",
-                inline=False
-            )
-
-            embed.add_field(
-                name="🆔 User ID",
-                value=f"`{user_id}`",
-                inline=False
-            )
-
-            embed.add_field(
-                name="🎮 Place ID",
-                value=f"`{place_id}`",
-                inline=False
-            )
-
-            embed.add_field(
-                name="🆔 Game ID",
-                value=f"`{game_id}`",
-                inline=False
-            )
-
-            embed.set_footer(
-                text=(
-                    f"Se revisaron "
-                    f"{len(servers)} servidores públicos."
-                )
-            )
-
-            await searching.edit(
-                content=None,
-                embed=embed,
-                view=None
-            )
-
-            return
-
-        # Encontrado
-        embed, view = await create_find_card(
-            ctx,
-            user,
-            presence,
-            found_server
-        )
-
-        await searching.edit(
-            content=None,
-            embed=embed,
-            view=view
-        )
-
-    except Exception as error:
-
-        print(
-            "ERROR EN !find:",
-            error
-        )
-
-        await searching.edit(
-            content=(
-                "❌ Ocurrió un error al "
-                "buscar el servidor."
-            ),
-            embed=None,
-            view=None
-        )
-
-
-# =========================================================
-# WATCHFIND - CREAR TARJETA
-# =========================================================
-
-async def send_watchfind_result(
-    channel,
-    user,
-    presence
-):
-
-    user_id = user["id"]
-    username = user["name"]
-
-    place_id = presence.get(
-        "placeId"
+    user = await asyncio.to_thread(
+        get_user,
+        username
     )
 
-    game_id = presence.get(
-        "gameId"
-    )
+    if not user:
 
-    if not place_id or not game_id:
-
-        await channel.send(
-            f"🟡 **{username}** está jugando, "
-            "pero Roblox no proporcionó "
-            "el servidor."
+        await ctx.send(
+            f"❌ No encontré al usuario **{username}**."
         )
 
         return
 
-    await channel.send(
-        f"🔎 **{username} está jugando!**\n"
-        "Buscando su servidor público..."
+    user_id = user["id"]
+
+    presence = await asyncio.to_thread(
+        get_presence,
+        user_id
+    )
+
+    if not presence:
+
+        await ctx.send(
+            f"⚫ **{user['name']}** está offline."
+        )
+
+        return
+
+    status = presence_text(presence)
+
+    if status != "Jugando":
+
+        await ctx.send(
+            f"⚠️ **{user['name']}** no está jugando.\n"
+            f"Estado: **{status}**"
+        )
+
+        return
+
+    place_id = presence.get("placeId")
+    game_id = presence.get("gameId")
+
+    if not place_id:
+
+        await ctx.send(
+            f"⚠️ No pude obtener el Place ID."
+        )
+
+        return
+
+    await ctx.send(
+        f"🎮 **{user['name']}** está jugando.\n"
+        f"Buscando su servidor público..."
     )
 
     servers = await asyncio.to_thread(
         get_all_servers,
-        int(place_id)
+        place_id
     )
 
-    found_server = None
+    target_server = None
 
     for server in servers:
 
         if server.get("id") == game_id:
 
-            found_server = server
+            target_server = server
 
             break
 
-    # No apareció en servidores públicos
-    if found_server is None:
+    if not target_server:
 
-        embed = discord.Embed(
-            title="🟡 Usuario jugando",
-            description=(
-                f"**{username}** está jugando, "
-                "pero su servidor no apareció "
-                "en la lista pública."
-            )
-        )
-
-        avatar_url = await asyncio.to_thread(
-            get_avatar,
-            user_id
-        )
-
-        if avatar_url:
-
-            embed.set_thumbnail(
-                url=avatar_url
-            )
-
-        embed.add_field(
-            name="👤 Usuario",
-            value=f"`{username}`",
-            inline=False
-        )
-
-        embed.add_field(
-            name="🆔 User ID",
-            value=f"`{user_id}`",
-            inline=False
-        )
-
-        embed.add_field(
-            name="🎮 Place ID",
-            value=f"`{place_id}`",
-            inline=False
-        )
-
-        embed.add_field(
-            name="🆔 Game ID",
-            value=f"`{game_id}`",
-            inline=False
-        )
-
-        embed.set_footer(
-            text=(
-                f"Se revisaron {len(servers)} "
-                "servidores públicos."
-            )
-        )
-
-        await channel.send(
-            embed=embed
+        await ctx.send(
+            f"⚠️ Encontré el Game ID de "
+            f"**{user['name']}**, pero no aparece "
+            f"en la lista de servidores públicos.\n\n"
+            f"**Game ID:** `{game_id}`"
         )
 
         return
 
-    # Servidor encontrado
-    playing = found_server.get(
-        "playing",
-        0
+    embed, join_url = await create_find_card(
+        user,
+        presence,
+        target_server
     )
 
-    max_players = found_server.get(
-        "maxPlayers",
-        0
+    view = FindView(join_url)
+
+    await ctx.send(
+        embed=embed,
+        view=view
     )
 
-    job_id = found_server.get(
-        "id",
-        "Desconocido"
+
+# =========================================================
+# WATCHFIND - ENCONTRAR SERVIDOR
+# =========================================================
+
+async def send_watchfind_result(
+    data,
+    presence
+):
+
+    user = data["user"]
+
+    channel = data["channel"]
+
+    place_id = presence.get("placeId")
+
+    game_id = presence.get("gameId")
+
+    if not place_id or not game_id:
+
+        return
+
+    await channel.send(
+        f"🔎 **{user['name']}** está jugando.\n"
+        f"Buscando servidor público..."
     )
 
-    avatar_url = await asyncio.to_thread(
-        get_avatar,
-        user_id
+    servers = await asyncio.to_thread(
+        get_all_servers,
+        place_id
     )
 
-    embed = discord.Embed(
-        title="🎯 ¡SERVIDOR ENCONTRADO!",
-        description=(
-            f"🟢 **{username} está jugando actualmente**"
-        )
-    )
+    target_server = None
 
-    if avatar_url:
+    for server in servers:
 
-        embed.set_thumbnail(
-            url=avatar_url
-        )
+        if server.get("id") == game_id:
 
-    embed.add_field(
-        name="👤 Usuario",
-        value=f"`{username}`",
-        inline=False
-    )
+            target_server = server
 
-    embed.add_field(
-        name="🆔 User ID",
-        value=f"`{user_id}`",
-        inline=False
-    )
+            break
 
-    embed.add_field(
-        name="🎮 Place ID",
-        value=f"`{place_id}`",
-        inline=False
-    )
+    if not target_server:
 
-    embed.add_field(
-        name="👥 Jugadores",
-        value=f"`{playing}/{max_players}`",
-        inline=False
-    )
-
-    embed.add_field(
-        name="🆔 Job ID",
-        value=f"`{job_id}`",
-        inline=False
-    )
-
-    embed.add_field(
-        name="📡 Estado",
-        value="🟢 Jugando",
-        inline=False
-    )
-
-    embed.set_footer(
-        text="Roblox WatchFind"
-    )
-
-    join_url = create_join_link(
-        place_id,
-        game_id
-    )
-
-    view = discord.ui.View(
-        timeout=300
-    )
-
-    button = discord.ui.Button(
-        label="Unirse al servidor",
-        emoji="🎮",
-        style=discord.ButtonStyle.success
-    )
-
-    async def join_callback(
-        interaction: discord.Interaction
-    ):
-
-        await interaction.response.send_message(
-            f"🎮 **Servidor encontrado**\n\n"
-            f"🔗 {join_url}",
-            ephemeral=True
+        await channel.send(
+            f"⚠️ No encontré el servidor público "
+            f"de **{user['name']}**.\n\n"
+            f"**Game ID:** `{game_id}`"
         )
 
-    button.callback = join_callback
+        return
 
-    view.add_item(button)
+    embed, join_url = await create_find_card(
+        user,
+        presence,
+        target_server
+    )
+
+    view = FindView(join_url)
 
     await channel.send(
         embed=embed,
@@ -1033,174 +834,249 @@ async def send_watchfind_result(
 
 
 # =========================================================
-# LOOP DE WATCH / WATCHFIND
+# LOOP PRINCIPAL
 # =========================================================
 
 @tasks.loop(seconds=15)
 async def check_presence():
 
-    global last_status
-    global watchfind_last_game_id
-
-    if watching_user is None:
+    if not watching_users:
         return
 
-    if watching_channel is None:
-        return
+    # Copiamos los usuarios actuales para que podamos
+    # modificar watching_users sin romper el loop.
+    users_to_check = list(watching_users.items())
 
-    presence = await asyncio.to_thread(
-        get_presence,
-        watching_user["id"]
+    user_ids = [
+        user_id
+        for user_id, data in users_to_check
+    ]
+
+    # =====================================================
+    # UNA SOLA CONSULTA AGRUPADA PARA TODOS
+    # =====================================================
+
+    presences = await asyncio.to_thread(
+        get_presences_batch,
+        user_ids
     )
 
-    if not presence:
-        return
-
-    status = presence.get(
-        "userPresenceType"
-    )
-
     # =====================================================
-    # WATCHFIND
+    # PROCESAR CADA USUARIO
     # =====================================================
 
-    if watchfind_enabled:
+    for user_id, data in users_to_check:
 
-        if status == 2:
+        # Puede que alguien haya usado !unwatch mientras
+        # estábamos procesando.
+        if user_id not in watching_users:
+            continue
 
-            place_id = presence.get(
-                "placeId"
+        user = data["user"]
+
+        channel = data["channel"]
+
+        mode = data["mode"]
+
+        presence = presences.get(user_id)
+
+        status = presence_text(presence)
+
+        last_status = data["last_status"]
+
+        last_game_id = data["last_game_id"]
+
+        current_game_id = None
+
+        if presence:
+            current_game_id = presence.get("gameId")
+
+        # =================================================
+        # WATCH NORMAL
+        # =================================================
+
+        if mode == "watch":
+
+            if last_status is None:
+
+                data["last_status"] = status
+
+                data["last_game_id"] = current_game_id
+
+                continue
+
+            if status != last_status:
+
+                if status == "Jugando":
+
+                    place_id = (
+                        presence.get("placeId")
+                        if presence else None
+                    )
+
+                    message = (
+                        f"🟢 **{user['name']}** "
+                        f"ahora está jugando."
+                    )
+
+                    if place_id:
+
+                        message += (
+                            f"\n📍 Place ID: `{place_id}`"
+                        )
+
+                    if current_game_id:
+
+                        message += (
+                            f"\n🎮 Game ID: `{current_game_id}`"
+                        )
+
+                    await channel.send(message)
+
+                elif status == "Offline":
+
+                    await channel.send(
+                        f"⚫ **{user['name']}** "
+                        f"ahora está offline."
+                    )
+
+                elif status == "Online":
+
+                    await channel.send(
+                        f"🟡 **{user['name']}** "
+                        f"está online pero no jugando."
+                    )
+
+                elif status == "En Roblox Studio":
+
+                    await channel.send(
+                        f"🛠️ **{user['name']}** "
+                        f"está en Roblox Studio."
+                    )
+
+                else:
+
+                    await channel.send(
+                        f"ℹ️ **{user['name']}** cambió "
+                        f"de estado a **{status}**."
+                    )
+
+            data["last_status"] = status
+
+            data["last_game_id"] = current_game_id
+
+        # =================================================
+        # WATCHFIND
+        # =================================================
+
+        elif mode == "watchfind":
+
+            # Primera comprobación.
+            if last_status is None:
+
+                data["last_status"] = status
+
+                data["last_game_id"] = current_game_id
+
+                # Si ya estaba jugando cuando empezamos
+                # a vigilarlo, intentamos encontrarlo.
+                if (
+                    status == "Jugando"
+                    and current_game_id
+                ):
+
+                    await send_watchfind_result(
+                        data,
+                        presence
+                    )
+
+                continue
+
+            # Entró a jugar.
+            started_playing = (
+                status == "Jugando"
+                and last_status != "Jugando"
             )
 
-            game_id = presence.get(
-                "gameId"
+            # Cambió de servidor.
+            changed_server = (
+                status == "Jugando"
+                and current_game_id
+                and current_game_id != last_game_id
             )
 
-            # Si no hay game ID
-            if not game_id:
+            if started_playing or changed_server:
 
-                return
+                await send_watchfind_result(
+                    data,
+                    presence
+                )
 
-            # Ya avisamos de este servidor
-            if game_id == watchfind_last_game_id:
+            # Si dejó de jugar.
+            if (
+                last_status == "Jugando"
+                and status != "Jugando"
+            ):
 
-                return
+                await channel.send(
+                    f"⚫ **{user['name']}** "
+                    f"dejó de jugar.\n"
+                    f"Estado: **{status}**"
+                )
 
-            # Nuevo servidor
-            watchfind_last_game_id = game_id
+            data["last_status"] = status
 
-            await send_watchfind_result(
-                watching_channel,
-                watching_user,
-                presence
-            )
-
-            return
-
-        # Si dejó de jugar,
-        # permitimos detectar nuevamente
-        # cuando vuelva a entrar.
-        if status != 2:
-
-            watchfind_last_game_id = None
-
-        return
-
-    # =====================================================
-    # WATCH NORMAL
-    # =====================================================
-
-    if status == last_status:
-
-        return
-
-    last_status = status
-
-    if status == 0:
-
-        await watching_channel.send(
-            f"🔴 **{watching_user['name']}** "
-            "está desconectado."
-        )
-
-    elif status == 1:
-
-        await watching_channel.send(
-            f"🟡 **{watching_user['name']}** "
-            "está en Roblox, pero no jugando."
-        )
-
-    elif status == 2:
-
-        place_id = presence.get(
-            "placeId"
-        )
-
-        game_id = presence.get(
-            "gameId"
-        )
-
-        message = (
-            f"🟢 **{watching_user['name']} está jugando!**\n\n"
-            f"**Place ID:** `{place_id}`\n"
-            f"**Game ID:** `{game_id}`"
-        )
-
-        if place_id and game_id:
-
-            join_link = create_join_link(
-                place_id,
-                game_id
-            )
-
-            message += (
-                f"\n\n🔗 **Intentar unirse:**\n"
-                f"{join_link}"
-            )
-
-        await watching_channel.send(
-            message
-        )
-
-    elif status == 3:
-
-        await watching_channel.send(
-            f"🟡 **{watching_user['name']}** "
-            "está en Roblox Studio."
-        )
+            data["last_game_id"] = current_game_id
 
 
 # =========================================================
-# SERVIDORES - PAGINACIÓN
+# SERVERS PAGINADOS
 # =========================================================
 
 class ServerPages(discord.ui.View):
 
     def __init__(
         self,
-        ctx,
-        place_id,
-        servers
+        servers,
+        place_id
     ):
 
-        super().__init__(
-            timeout=300
-        )
+        super().__init__(timeout=180)
 
-        self.ctx = ctx
-        self.place_id = place_id
         self.servers = servers
 
+        self.place_id = place_id
+
         self.page = 0
+
         self.per_page = 10
-        self.message = None
 
         self.update_buttons()
 
-    @property
-    def total_pages(self):
+    def update_buttons(self):
 
-        return max(
+        self.previous.disabled = (
+            self.page <= 0
+        )
+
+        self.next.disabled = (
+            (self.page + 1)
+            * self.per_page
+            >= len(self.servers)
+        )
+
+    def get_embed(self):
+
+        start = (
+            self.page
+            * self.per_page
+        )
+
+        end = start + self.per_page
+
+        page_servers = self.servers[start:end]
+
+        total_pages = max(
             1,
             (
                 len(self.servers)
@@ -1210,98 +1086,68 @@ class ServerPages(discord.ui.View):
             // self.per_page
         )
 
-    def update_buttons(self):
-
-        self.previous_button.disabled = (
-            self.page <= 0
-        )
-
-        self.next_button.disabled = (
-            self.page >= self.total_pages - 1
-        )
-
-    def create_embed(self):
-
-        start = (
-            self.page
-            * self.per_page
-        )
-
-        end = start + self.per_page
-
-        current_servers = self.servers[
-            start:end
-        ]
-
         embed = discord.Embed(
-            title="🎮 Servidores públicos",
+            title=f"🎮 Servidores públicos",
             description=(
-                f"**Place ID:** `{self.place_id}`\n"
-                "📊 Más vacío → más lleno\n"
-                f"📦 Servidores: **{len(self.servers)}**"
-            )
+                f"Place ID: `{self.place_id}`\n"
+                f"Página `{self.page + 1}/{total_pages}`"
+            ),
+            color=discord.Color.blurple()
         )
 
-        for i, server in enumerate(
-            current_servers,
-            start=start + 1
-        ):
-
-            playing = server.get(
-                "playing",
-                0
-            )
-
-            max_players = server.get(
-                "maxPlayers",
-                0
-            )
-
-            job_id = server.get(
-                "id",
-                "Desconocido"
-            )
+        if not page_servers:
 
             embed.add_field(
-                name=(
-                    f"#{i}  👥 "
-                    f"{playing}/{max_players}"
-                ),
-                value=(
-                    f"Job ID: `{job_id}`"
-                ),
+                name="Sin servidores",
+                value="No se encontraron servidores.",
                 inline=False
             )
 
-        embed.set_footer(
-            text=(
-                f"Página "
-                f"{self.page + 1}/"
-                f"{self.total_pages}"
-            )
-        )
+        else:
+
+            for index, server in enumerate(
+                page_servers,
+                start=1
+            ):
+
+                playing = server.get(
+                    "playing",
+                    0
+                )
+
+                max_players = server.get(
+                    "maxPlayers",
+                    0
+                )
+
+                job_id = server.get(
+                    "id",
+                    "Unknown"
+                )
+
+                embed.add_field(
+                    name=(
+                        f"{index}. "
+                        f"{playing}/{max_players} jugadores"
+                    ),
+                    value=(
+                        f"Job ID:\n"
+                        f"`{job_id}`"
+                    ),
+                    inline=False
+                )
 
         return embed
 
     @discord.ui.button(
-        label="Anterior",
-        emoji="⬅️",
-        style=discord.ButtonStyle.secondary
+        label="⬅️",
+        style=discord.ButtonStyle.gray
     )
-    async def previous_button(
+    async def previous(
         self,
-        interaction,
-        button
+        interaction: discord.Interaction,
+        button: discord.ui.Button
     ):
-
-        if interaction.user.id != self.ctx.author.id:
-
-            await interaction.response.send_message(
-                "❌ No puedes controlar esta búsqueda.",
-                ephemeral=True
-            )
-
-            return
 
         if self.page > 0:
 
@@ -1310,93 +1156,36 @@ class ServerPages(discord.ui.View):
         self.update_buttons()
 
         await interaction.response.edit_message(
-            embed=self.create_embed(),
+            embed=self.get_embed(),
             view=self
         )
 
     @discord.ui.button(
-        label="Siguiente",
-        emoji="➡️",
-        style=discord.ButtonStyle.secondary
+        label="➡️",
+        style=discord.ButtonStyle.gray
     )
-    async def next_button(
+    async def next(
         self,
-        interaction,
-        button
+        interaction: discord.Interaction,
+        button: discord.ui.Button
     ):
 
-        if interaction.user.id != self.ctx.author.id:
+        max_page = (
+            len(self.servers)
+            + self.per_page
+            - 1
+        ) // self.per_page - 1
 
-            await interaction.response.send_message(
-                "❌ No puedes controlar esta búsqueda.",
-                ephemeral=True
-            )
-
-            return
-
-        if self.page < self.total_pages - 1:
+        if self.page < max_page:
 
             self.page += 1
 
         self.update_buttons()
 
         await interaction.response.edit_message(
-            embed=self.create_embed(),
+            embed=self.get_embed(),
             view=self
         )
-
-    @discord.ui.button(
-        label="Actualizar",
-        emoji="🔄",
-        style=discord.ButtonStyle.primary
-    )
-    async def refresh_button(
-        self,
-        interaction,
-        button
-    ):
-
-        if interaction.user.id != self.ctx.author.id:
-
-            await interaction.response.send_message(
-                "❌ No puedes controlar esta búsqueda.",
-                ephemeral=True
-            )
-
-            return
-
-        await interaction.response.defer()
-
-        self.servers = await asyncio.to_thread(
-            get_all_servers,
-            self.place_id
-        )
-
-        self.page = 0
-
-        self.update_buttons()
-
-        await interaction.edit_original_response(
-            embed=self.create_embed(),
-            view=self
-        )
-
-    async def on_timeout(self):
-
-        for item in self.children:
-
-            item.disabled = True
-
-        if self.message:
-
-            try:
-
-                await self.message.edit(
-                    view=self
-                )
-
-            except Exception:
-                pass
 
 
 # =========================================================
@@ -1404,64 +1193,68 @@ class ServerPages(discord.ui.View):
 # =========================================================
 
 @bot.command()
-async def servers(ctx, place_id: int):
+async def servers(ctx, place_id):
 
-    searching = await ctx.send(
+    await ctx.send(
         f"🔎 Buscando servidores públicos "
-        f"de `{place_id}`..."
+        f"para `{place_id}`..."
     )
 
-    try:
+    all_servers = await asyncio.to_thread(
+        get_all_servers,
+        place_id
+    )
 
-        servers = await asyncio.to_thread(
-            get_all_servers,
-            place_id
+    if not all_servers:
+
+        await ctx.send(
+            "❌ No encontré servidores públicos."
         )
 
-        if not servers:
+        return
 
-            await searching.edit(
-                content=(
-                    "❌ No encontré "
-                    "servidores públicos."
-                ),
-                embed=None,
-                view=None
-            )
+    view = ServerPages(
+        all_servers,
+        place_id
+    )
 
-            return
+    await ctx.send(
+        embed=view.get_embed(),
+        view=view
+    )
 
-        view = ServerPages(
-            ctx,
-            place_id,
-            servers
+
+# =========================================================
+# ERRORES DE COMANDOS
+# =========================================================
+
+@bot.event
+async def on_command_error(ctx, error):
+
+    if isinstance(
+        error,
+        commands.MissingRequiredArgument
+    ):
+
+        await ctx.send(
+            "❌ Te falta un argumento.\n\n"
+            "Ejemplo:\n"
+            "`!watch Builderman`"
         )
 
-        embed = view.create_embed()
+        return
 
-        await searching.edit(
-            content=None,
-            embed=embed,
-            view=view
-        )
+    if isinstance(
+        error,
+        commands.CommandNotFound
+    ):
 
-        view.message = searching
+        return
 
-    except Exception as error:
-
-        print(
-            "ERROR EN !servers:",
-            error
-        )
-
-        await searching.edit(
-            content=(
-                "❌ Ocurrió un error al "
-                "consultar los servidores."
-            ),
-            embed=None,
-            view=None
-        )
+    print(
+        "Error de comando:",
+        repr(error)
+    )
 
 
 # =========================================================
